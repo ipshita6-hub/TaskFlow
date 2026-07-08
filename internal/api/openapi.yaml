@@ -1,0 +1,845 @@
+openapi: 3.0.0
+info:
+  title: TaskFlow API
+  description: A concurrent task scheduling system with REST API-driven task management
+  version: 1.0.0
+
+servers:
+  - url: /api/v1
+    description: TaskFlow API v1
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authenticated requests
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - email
+        - created_at
+
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        task_type:
+          type: string
+        payload:
+          type: object
+        schedule_type:
+          type: string
+          enum: ["one_time", "recurring"]
+        scheduled_at:
+          type: string
+          format: date-time
+          nullable: true
+        cron_expr:
+          type: string
+          nullable: true
+        next_run_at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: ["pending", "active", "running", "completed", "failed", "deleted"]
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 10
+        backoff_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - task_type
+        - payload
+        - schedule_type
+        - status
+        - max_attempts
+        - backoff_seconds
+        - created_at
+        - updated_at
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: ["queued", "running", "completed", "failed", "exhausted"]
+        attempt:
+          type: integer
+        enqueued_at:
+          type: string
+          format: date-time
+        run_after:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        worker_id:
+          type: string
+          format: uuid
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+      required:
+        - id
+        - task_id
+        - status
+        - attempt
+        - enqueued_at
+        - run_after
+
+    ExecutionLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        attempt:
+          type: integer
+        status:
+          type: string
+          enum: ["completed", "failed"]
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+        output:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - job_id
+        - task_id
+        - attempt
+        - status
+        - started_at
+        - ended_at
+        - duration_ms
+        - created_at
+
+    WorkerRegistration:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+        status:
+          type: string
+          enum: ["active", "stale"]
+        started_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - hostname
+        - status
+        - started_at
+        - last_heartbeat_at
+
+    RetryPolicy:
+      type: object
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 10
+        backoff_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+      required:
+        - max_attempts
+        - backoff_seconds
+
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        next_times:
+          type: array
+          items:
+            type: string
+            format: date-time
+          nullable: true
+        error:
+          type: object
+          properties:
+            field:
+              type: string
+            position:
+              type: integer
+            message:
+              type: string
+          nullable: true
+
+    PaginatedResponse:
+      type: object
+      properties:
+        data:
+          type: array
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - page_size
+
+    UpdateTaskRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        payload:
+          type: object
+        cron_expr:
+          type: string
+        scheduled_at:
+          type: string
+          format: date-time
+        retry_policy:
+          $ref: "#/components/schemas/RetryPolicy"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        ref:
+          type: string
+          description: Unique error reference ID (only for 500 errors)
+      required:
+        - error
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+            required:
+              - field
+              - message
+
+paths:
+  /auth/register:
+    post:
+      summary: Register a new user
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+              required:
+                - email
+                - password
+      responses:
+        "201":
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/login:
+    post:
+      summary: Log in and receive JWT
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+              required:
+                - email
+                - password
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+                required:
+                  - token
+                  - expires_at
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tasks:
+    post:
+      summary: Create a new task
+      tags:
+        - Tasks
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                task_type:
+                  type: string
+                payload:
+                  type: object
+                schedule_type:
+                  type: string
+                  enum: ["one_time", "recurring"]
+                scheduled_at:
+                  type: string
+                  format: date-time
+                cron_expr:
+                  type: string
+                retry_policy:
+                  $ref: "#/components/schemas/RetryPolicy"
+              required:
+                - name
+                - task_type
+                - payload
+                - schedule_type
+      responses:
+        "201":
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      summary: List user's tasks
+      tags:
+        - Tasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tasks/{id}:
+    get:
+      summary: Get a task by ID
+      tags:
+        - Tasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Task details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    patch:
+      summary: Update a task
+      tags:
+        - Tasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTaskRequest"
+      responses:
+        "200":
+          description: Task updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict (task is running)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      summary: Delete a task
+      tags:
+        - Tasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Task deleted successfully
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tasks/{id}/logs:
+    get:
+      summary: Get execution logs for a task
+      tags:
+        - Jobs
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: ["completed", "failed"]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Execution logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/dlq:
+    get:
+      summary: List dead-letter queue jobs
+      tags:
+        - Jobs
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Dead-letter queue jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /workers:
+    get:
+      summary: List registered workers
+      tags:
+        - Workers
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of registered workers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WorkerRegistration"
+                required:
+                  - data
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /schedule/validate:
+    get:
+      summary: Validate a cron expression
+      tags:
+        - Utilities
+      parameters:
+        - name: expr
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Validation result with next execution times
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Cron expression parse error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /docs:
+    get:
+      summary: Get OpenAPI specification
+      tags:
+        - Utilities
+      responses:
+        "200":
+          description: OpenAPI 3.0 specification in YAML format
+          content:
+            application/yaml:
+              schema:
+                type: string
